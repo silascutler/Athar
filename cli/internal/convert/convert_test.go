@@ -106,7 +106,7 @@ func TestSpecExamples(t *testing.T) {
 		"modat":   {`http.headers: (key = "Www-Authenticate" and value = "Basic realm=\"ARTEX\", charset=\"UTF-8\"")`, Exact},
 		"fofa":    {`header="Basic realm=\"ARTEX\", charset=\"UTF-8\""`, Approximate},
 		"zoomeye": {`http.header="Basic realm=\"ARTEX\", charset=\"UTF-8\""`, Approximate},
-		"censys":  {"", Unsupported},
+		"censys":  {`host.services: (endpoints.http.headers: (key = "Www-Authenticate" and value =~ "(?i)^Basic realm=\\\"ARTEX\\\", charset=\\\"UTF-8\\\"$"))`, Exact},
 		"urlscan": {"", Unsupported},
 		"huntio":  {`SELECT ip, service.port FROM ip.current WHERE same_port(http.headers.bytes.content LIKE '%Basic realm="ARTEX", charset="UTF-8"%')`, Approximate},
 	})
@@ -220,9 +220,12 @@ sel:
 condition: sel
 `)
 	check(t, r, map[string]want{
-		"fofa":   {`title=="Say \"hi\"" && cert.subject.cn=".example.org"`, Approximate},
-		"modat":  {`http.title="Say \"hi\"" and tls.subject.common_name=~"\.example\.org$"`, Exact},
-		"censys": {`host.services: (endpoints.http.html_title = "Say \"hi\"" and cert.parsed.subject.common_name =~ "\\.example\\.org$")`, Approximate},
+		"fofa":  {`title=="Say \"hi\"" && cert.subject.cn=".example.org"`, Approximate},
+		"modat": {`http.title="Say \"hi\"" and tls.subject.common_name=~"\.example\.org$"`, Exact},
+		// Censys "=" is case-sensitive, so a case-insensitive exact match is
+		// an anchored regex; a common name is tokenised by domain label, so
+		// a suffix search needs a regex too.
+		"censys": {`host.services: (endpoints.http.html_title =~ "(?i)^Say \\\"hi\\\"$" and cert.parsed.subject.common_name =~ "(?i)\\.example\\.org$")`, Exact},
 	})
 
 	// A quote or a backslash in a value never ends the quoted string.
@@ -248,7 +251,7 @@ condition: sel
 		}},
 		// Only regex operators are escaped: no \= or \-.
 		{`tls.cert.subject.cn|startswith: 'a=b-c,d.e@f'`, map[string]want{
-			"censys": {`host.services: (cert.parsed.subject.common_name =~ "^a=b-c,d\\.e@f")`, Approximate},
+			"censys": {`host.services: (cert.parsed.subject.common_name =~ "(?i)^a=b-c,d\\.e@f")`, Exact},
 			"modat":  {`tls.subject.common_name=~"^a=b-c,d\.e[@]f"`, Exact},
 		}},
 		// Modat has no documented way to write a backslash, so the value is
@@ -585,7 +588,9 @@ func TestTargetTLS(t *testing.T) {
 		{"required, zoomeye", title, "required", "zoomeye", `title=="Console"`, Approximate, required},
 		{"required, modat", title, "required", "modat", `http.title="Console"`, Superset, required},
 		{"required, already approximate", title, "required", "shodan", `http.title:"Console"`, Approximate, required},
-		{"none, already approximate", title, "none", "censys", `host.services: (endpoints.http.html_title = "Console")`, Approximate, none},
+		{"none, already approximate", "selection:\n  http.title|contains: 'Console'\ncondition: selection\n",
+			"none", "censys", `host.services: (endpoints.http.html_title: "Console")`, Approximate, none},
+		{"none, censys exact", title, "none", "censys", `host.services: (endpoints.http.html_title =~ "(?i)^Console$")`, Superset, none},
 		{"required, urlscan", title, "required", "urlscan", `page.title.keyword:"console"`, Superset, required},
 		{"required, already superset", "selection:\n  http.title: 'Console'\n  service.banner|contains: 'x-y'\ncondition: selection\n",
 			"required", "urlscan", `page.title.keyword:"console"`, Superset, required},
@@ -734,6 +739,12 @@ func checkLiteral(engine, q, op, value, sample string) string {
 			return "not wrapped in host.services: ( )"
 		}
 		q = strings.TrimSuffix(inner, ")")
+		if in, ok := strings.CutPrefix(strings.Replace(q, `"Server"`, `"X-Test"`, 1), `endpoints.http.headers: (key = "X-Test" and value `); ok {
+			if !strings.HasSuffix(in, ")") {
+				return "the header group is not closed"
+			}
+			q = "value " + strings.TrimSuffix(in, ")")
+		}
 	case "modat":
 		if inner, ok := strings.CutPrefix(strings.Replace(q, `"Server"`, `"X-Test"`, 1), `http.headers: (key = "X-Test" and value `); ok {
 			if !strings.HasSuffix(inner, ")") {
@@ -946,9 +957,6 @@ func TestUnverifiedFields(t *testing.T) {
 		{"fofa", `http.status_code: 200`, `status_code="200"`},
 		{"fofa", `tls.cert.issuer.cn|contains: 'PentAGI CA'`, `cert.issuer.cn="PentAGI CA"`},
 		{"shodan", `http.body.mmh3: 123`, `http.html_hash:123`},
-		{"censys", `http.status_code: 200`, `host.services: (endpoints.http.status_code = "200")`},
-		{"censys", `tls.cert.subject.cn|cased: Cairn`, `host.services: (cert.parsed.subject.common_name = "Cairn")`},
-		{"censys", `tls.cert.issuer.cn|cased: 'PentAGI CA'`, `host.services: (cert.parsed.issuer.common_name = "PentAGI CA")`},
 		{"modat", `http.body.mmh3: 123`, `http.body_mmh3=123`},
 	}
 	for _, c := range cases {
@@ -962,11 +970,11 @@ func TestUnverifiedFields(t *testing.T) {
 
 	// Fields whose meaning on the engine is not recorded are not converted:
 	// FOFA's body_hash (algorithm undocumented, docs/decisions.md), Shodan's
-	// ssl.cert.fingerprint (hash not recorded), Censys headers and keywords.
+	// ssl.cert.fingerprint (hash not recorded) and Censys keywords, which
+	// can't be nested in host.services.
 	dropped := []struct{ engine, detection string }{
 		{"fofa", "http.body.mmh3: 123"},
 		{"shodan", "tls.cert.sha256: " + strings.Repeat("ab", 32)},
-		{"censys", "http.headers.server|contains: nginx"},
 		{"censys", "- ARTEX"},
 		{"huntio", "http.body.mmh3: 123"},
 		{"huntio", "service.banner|contains: SSH"},
@@ -991,9 +999,14 @@ var appendixRows = map[string]string{
 	"`http.body.sha256`":    "http.body.sha256: " + strings.Repeat("ab", 32),
 	"`tls.cert.subject.cn`": "tls.cert.subject.cn: x",
 	"`tls.cert.issuer.cn`":  "tls.cert.issuer.cn: x",
+	"`tls.cert.subject.dn`": "tls.cert.subject.dn: x",
+	"`tls.cert.issuer.dn`":  "tls.cert.issuer.dn: x",
+	"`tls.cert.san`":        "tls.cert.san: x",
 	"`tls.cert.sha256`":     "tls.cert.sha256: " + strings.Repeat("ab", 32),
+	"`tls.cert.sha1`":       "tls.cert.sha1: " + strings.Repeat("ab", 20),
 	"`tls.jarm`":            "tls.jarm: " + strings.Repeat("ab", 31),
 	"`tls.ja3s`":            "tls.ja3s: " + strings.Repeat("ab", 16),
+	"`tls.ja4s`":            "tls.ja4s: t130200_1303_a56c5b993250",
 	"`service.banner`":      "service.banner: x",
 	"`service.port`":        "service.port: 443",
 	"`keywords`":            "- x",
@@ -1068,19 +1081,20 @@ func TestAppendixAMatchesBackends(t *testing.T) {
 
 // An engine search that ignores case finds more than a |cased term. Under
 // not it would exclude services the rule matches, so the term is dropped;
-// case-sensitive operators (Modat's ~~ and ==, Censys =) stay.
+// case-sensitive operators (Modat's ~~ and ==, Censys = and =~) stay.
 func TestNegatedCasedTerms(t *testing.T) {
 	r := ruleFrom(t, "sel:\n  http.title|contains: Console\nfilter:\n  http.title|contains|cased: ARTEX\ncondition: sel and not filter\n")
 	check(t, r, map[string]want{
 		"fofa":    {`title="Console"`, Superset},
 		"zoomeye": {`title="Console"`, Superset},
 		"shodan":  {`http.title:"Console"`, Superset},
-		"censys":  {`host.services: (endpoints.http.html_title: "Console")`, Superset},
+		// Censys regex is case-sensitive, so a |cased filter keeps its meaning.
+		"censys":  {`host.services: (endpoints.http.html_title: "Console" and not endpoints.http.html_title =~ "ARTEX")`, Approximate},
 		"urlscan": {`page.title.keyword:/.*console.*/`, Superset},
 		"modat":   {`http.title~"Console" and not http.title~~"ARTEX"`, Exact},
 		"huntio":  {`SELECT ip, service.port FROM ip.current WHERE same_port(html.head.title LIKE '%Console%' AND NOT (html.head.title LIKE '%ARTEX%'))`, Approximate},
 	})
-	for _, engine := range []string{"fofa", "zoomeye", "shodan", "censys", "urlscan"} {
+	for _, engine := range []string{"fofa", "zoomeye", "shodan", "urlscan"} {
 		res, _ := Convert(r, engine)
 		if notes := strings.Join(res.Notes, " "); !strings.Contains(notes, `not http.title|contains "ARTEX"`) || !strings.Contains(notes, "case") || !strings.Contains(notes, "would also exclude services the rule matches") {
 			t.Errorf("%s: notes don't explain the dropped filter: %v", engine, res.Notes)
@@ -1099,15 +1113,17 @@ func TestNegatedCasedTerms(t *testing.T) {
 		"modat":  {`http.title~"Console" and not http.title=="ARTEX"`, Exact},
 	})
 
-	// Censys does not document whether its regex ignores case.
+	// Censys regex is case-sensitive by default, so a |cased prefix filter
+	// is written without (?i) and keeps the rule's meaning under not.
 	r = ruleFrom(t, "sel:\n  http.title|contains: Console\nfilter:\n  http.title|startswith|cased: ARTEX\ncondition: sel and not filter\n")
 	check(t, r, map[string]want{
-		"censys": {`host.services: (endpoints.http.html_title: "Console")`, Superset},
+		"censys": {`host.services: (endpoints.http.html_title: "Console" and not endpoints.http.html_title =~ "^ARTEX")`, Approximate},
 		"modat":  {`http.title~"Console" and not http.title==~"^ARTEX"`, Exact},
 	})
+	// Without |cased the regex carries (?i), which matches the rule.
 	r = ruleFrom(t, "sel:\n  http.title|contains: Console\nfilter:\n  http.title|startswith: ARTEX\ncondition: sel and not filter\n")
 	check(t, r, map[string]want{
-		"censys": {`host.services: (endpoints.http.html_title: "Console" and not endpoints.http.html_title =~ "^ARTEX")`, Approximate},
+		"censys": {`host.services: (endpoints.http.html_title: "Console" and not endpoints.http.html_title =~ "(?i)^ARTEX")`, Approximate},
 	})
 }
 
@@ -1119,12 +1135,13 @@ func TestCasedTerms(t *testing.T) {
 		"fofa":    {`title="ARTEX"`, Approximate},
 		"zoomeye": {`title="ARTEX"`, Approximate},
 		"shodan":  {`http.title:"ARTEX"`, Approximate},
-		"censys":  {`host.services: (endpoints.http.html_title: "ARTEX")`, Approximate},
+		// Censys searches a |cased substring as a case-sensitive regex.
+		"censys":  {`host.services: (endpoints.http.html_title =~ "ARTEX")`, Exact},
 		"urlscan": {`page.title.keyword:/.*artex.*/`, Approximate},
 		"modat":   {`http.title~~"ARTEX"`, Exact},
 		"huntio":  {`SELECT ip, service.port FROM ip.current WHERE same_port(html.head.title LIKE '%ARTEX%')`, Exact},
 	})
-	for _, engine := range []string{"fofa", "zoomeye", "shodan", "censys", "urlscan"} {
+	for _, engine := range []string{"fofa", "zoomeye", "shodan", "urlscan"} {
 		res, _ := Convert(r, engine)
 		if notes := strings.Join(res.Notes, " "); !strings.Contains(notes, "case") {
 			t.Errorf("%s: no note on the lost |cased: %v", engine, res.Notes)

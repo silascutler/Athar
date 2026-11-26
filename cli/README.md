@@ -200,5 +200,5 @@ Packages stay under `internal/` until the API settles. The evaluator is the firs
 
 1. ~~`rule`, `condition`, `eval` and `athar verify`~~ (done): the evaluator defines what rules mean, and CI needs it first.
 2. ~~`probe`, `scan`, `output` and `athar scan` for TCP, TLS and HTTP~~ (done). Next for scan: JARM, JA3S, SSH host key and key exchange.
-3. ~~`convert` and `athar convert` for FOFA, Shodan, Censys, ZoomEye, Modat, urlscan.io and Hunt.io~~ (done), Nuclei templates (done) and Nmap NSE (done). Next: Censys header search, once its syntax is verified; other targets are in [docs/conversion-targets.md](../docs/conversion-targets.md).
+3. ~~`convert` and `athar convert` for FOFA, Shodan, Censys, ZoomEye, Modat, urlscan.io and Hunt.io~~ (done), Nuclei templates (done) and Nmap NSE (done), including Censys header search. Other targets are in [docs/conversion-targets.md](../docs/conversion-targets.md).
 4. `fields` adapters and `athar match`.
